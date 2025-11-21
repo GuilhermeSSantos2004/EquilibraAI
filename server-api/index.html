@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <title>Monitor de Postura - Home Office</title>
+  <style>
+    body {
+      background: #111;
+      color: #fff;
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      min-height: 100vh;
+      padding-top: 20px;
+    }
+
+    h1 {
+      margin-bottom: 10px;
+      font-size: 22px;
+    }
+
+    #video, #canvas {
+      border-radius: 8px;
+    }
+
+    #container {
+      position: relative;
+      width: 640px;
+      height: 480px;
+    }
+
+    #video {
+      display: none;
+    }
+
+    #canvas {
+      position: absolute;
+      left: 0;
+      top: 0;
+    }
+
+    #status {
+      margin-top: 20px;
+      font-size: 24px;
+      font-weight: bold;
+      padding: 10px 20px;
+      border-radius: 8px;
+    }
+
+    .ok {
+      background: #134e4a;
+      color: #6ee7b7;
+      border: 1px solid #6ee7b7;
+    }
+
+    .bad {
+      background: #450a0a;
+      color: #fecaca;
+      border: 1px solid #fecaca;
+    }
+  </style>
+</head>
+<body>
+  <h1>Monitor de Postura (Cadeira / Home Office)</h1>
+  <p>Fique sentado de frente para a câmera.</p>
+
+  <div id="container">
+    <video id="video" width="640" height="480" autoplay playsinline></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+  </div>
+
+  <div id="status" class="bad">Carregando modelo...</div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+
+  <script>
+    const API_URL = "http://b18922adb64b.ngrok-free.app/postura"; 
+    let ultimaExecucao = 0;
+
+    const videoElement = document.getElementById('video');
+    const canvasElement = document.getElementById('canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const statusEl = document.getElementById('status');
+
+    function angle3pts(A, B, C) {
+      if (!A || !B || !C) return null;
+
+      const AB = { x: A.x - B.x, y: A.y - B.y };
+      const CB = { x: C.x - B.x, y: C.y - B.y };
+
+      const dot = AB.x * CB.x + AB.y * CB.y;
+      const magAB = Math.sqrt(AB.x * AB.x + AB.y * AB.y);
+      const magCB = Math.sqrt(CB.x * CB.x + CB.y * CB.y);
+
+      if (magAB === 0 || magCB === 0) return null;
+
+      let cosAngle = dot / (magAB * magCB);
+      cosAngle = Math.min(1, Math.max(-1, cosAngle));
+      return Math.acos(cosAngle) * (180 / Math.PI);
+    }
+
+    function avaliarPostura(landmarks) {
+      if (!landmarks) return { ok: false, motivo: "Sem dados" };
+
+      const leftEar = landmarks[7];
+      const rightEar = landmarks[8];
+      const leftShoulder = landmarks[11];
+      const rightShoulder = landmarks[12];
+      const leftHip = landmarks[23];
+      const rightHip = landmarks[24];
+
+      const angEsq = angle3pts(leftEar, leftShoulder, leftHip);
+      const angDir = angle3pts(rightEar, rightShoulder, rightHip);
+      const diffOmbros = Math.abs(leftShoulder.y - rightShoulder.y);
+
+      const LIMIAR_ANG = 150;
+      const LIMIAR_OMBROS = 0.03;
+
+      let ok = true;
+      let motivos = [];
+
+      if (angEsq < LIMIAR_ANG) {
+        ok = false;
+        motivos.push("Tronco inclinado (esquerdo)");
+      }
+
+      if (angDir < LIMIAR_ANG) {
+        ok = false;
+        motivos.push("Tronco inclinado (direito)");
+      }
+
+      if (diffOmbros > LIMIAR_OMBROS) {
+        ok = false;
+        motivos.push("Ombros desalinhados");
+      }
+
+      return {
+        ok,
+        motivo: motivos.length ? motivos.join(" | ") : "Postura adequada"
+      };
+    }
+
+    async function enviarPosturaAPI(avaliacao) {
+      try {
+        const agora = Date.now();
+        if (agora - ultimaExecucao < 1000) return; // envia só 1x por segundo
+        ultimaExecucao = agora;
+
+        await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            posturaOk: avaliacao.ok,
+            motivo: avaliacao.motivo,
+            enviadoEm: new Date().toISOString()
+          })
+        });
+      } catch (e) {
+        console.log("Falha ao enviar postura:", e);
+      }
+    }
+
+    function onResults(results) {
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+      if (results.poseLandmarks) {
+        drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, { lineWidth: 3 });
+        drawLandmarks(canvasCtx, results.poseLandmarks, { lineWidth: 2, radius: 3 });
+
+        const avaliacao = avaliarPostura(results.poseLandmarks);
+        enviarPosturaAPI(avaliacao);
+
+        if (avaliacao.ok) {
+          statusEl.textContent = "🟢 Postura OK";
+          statusEl.className = "ok";
+        } else {
+          statusEl.textContent = "🔴 Postura INCORRETA";
+          statusEl.className = "bad";
+        }
+      }
+
+      canvasCtx.restore();
+    }
+
+    const pose = new Pose({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}`
+    });
+
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    pose.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await pose.send({ image: videoElement });
+      },
+      width: 640,
+      height: 480
+    });
+
+    camera.start().then(() => {
+      statusEl.textContent = "Aponte-se para a câmera e sente normal.";
+    });
+  </script>
+</body>
+</html>
